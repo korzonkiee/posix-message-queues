@@ -50,6 +50,8 @@ typedef struct NeighboursCollection
 	int size;
 } NeighboursCollection;
 
+NeighboursCollection neighboursCollection;
+
 void prepend(char* s, const char* t)
 {
 	size_t len = strlen(t);
@@ -106,19 +108,23 @@ void initializeQueue(mqd_t *queue, char *queueId)
 void intHandler(int dummy)
 {
 	int i;
-	for (i = 0; i < neighboursSize; i++)
+	for (i = 0; i < neighboursCollection.size; i++)
 	{
 		mqd_t queue;
-		initializeQueue(&queue, neighbours[i]);
+		char neighbourPid[MAX_PID_LENGTH];
+		strcpy(neighbourPid, neighboursCollection.neighbours[i].pid);
 
-		printf("\nSending terminate singal to [%s]", neighbours[i]);
-		long pid = strtol(neighbours[i], NULL, 10);
+		initializeQueue(&queue, neighbourPid);
+
+
+		printf("\nSending terminate singal to [%s]", neighbourPid);
+		long pid = strtol(neighbourPid, NULL, 10);
 		if (kill(pid, SIGINT))
 		{
 			ERR("Error sending kill to process\n");
 		}
 
-		closeQueue(&queue, neighbours[i]);
+		closeQueue(&queue, neighbourPid);
 	}
 	printf("\nTerminating...\n");
 	exit(EXIT_SUCCESS);
@@ -166,29 +172,29 @@ void createCurrentProcessPidString(char **myPid)
 	sprintf(*myPid, "%ld", pid);
 }
 
-void addNeighbour(char *neighbourPid)
+void addNeighbourToCollection(Neighbour neighbour)
 {
-	neighboursSize++;
-	if (neighbours == NULL)
-	{
-		neighbours = (char**) malloc(sizeof(char*) * neighboursSize);
-	}
-	else
-	{	
-		neighbours = (char**) realloc(neighbours, sizeof(char*) * neighboursSize);
-	}
-	
-	neighbours[neighboursSize - 1] = (char*) malloc(sizeof(char) * strlen(neighbourPid));
-	strcpy(neighbours[neighboursSize-1], neighbourPid);
+	neighboursCollection
+		.neighbours[(neighboursCollection.size)++] = neighbour;
+}
+
+Neighbour createNeighbour(char *neighbourPid, mqd_t queue)
+{
+	Neighbour neighbour;
+
+	strcpy(neighbour.pid, neighbourPid);
+	neighbour.queue = queue;
+
+	return neighbour;
 }
 
 void printNeighbours()
 {
 	printf("My neighbours:\n");
 	int i;
-	for (i = 0; i < neighboursSize; i++)
+	for (i = 0; i < neighboursCollection.size; i++)
 	{
-		printf("%d. [%s]\n",i + 1, neighbours[i]);
+		printf("%d. [%s]\n", i + 1, neighboursCollection.neighbours[i].pid);
 	}
 	printf("\n");
 }
@@ -240,7 +246,8 @@ void mq_handler(int sig, siginfo_t *info, void *p)
 					break;
 				case Registration:
 					printf("RegistrationRequest\n");
-					addNeighbour(message->senderPid);
+					Neighbour neighbour = createNeighbour(message->senderPid, *pin);
+					addNeighbourToCollection(neighbour);
 					printNeighbours();
 					break;
 				default:
@@ -262,7 +269,7 @@ void mq_handler(int sig, siginfo_t *info, void *p)
 	}
 }
 
-void sendRegistrationRequest(char *senderPid, char *queueName)
+void sendRegistrationRequest(char *senderPid, char *queueName, char* receiverPid)
 {
 	mqd_t queue;
 	initializeQueue(&queue, queueName);
@@ -275,6 +282,22 @@ void sendRegistrationRequest(char *senderPid, char *queueName)
 	{
 		ERR("mq_send");
 	}
+
+	Neighbour neighbour = createNeighbour(receiverPid, queue);
+	addNeighbourToCollection(neighbour);
+}
+
+Neighbour findNeighbourByPid(char *neighbourPid)
+{
+	int i;
+	for (i = 0; i < neighboursCollection.size; i++)
+	{
+		if (strcmp(neighboursCollection.neighbours[i].pid, neighbourPid) == 0)
+			return neighboursCollection.neighbours[i];
+	}
+
+	Neighbour neighbour = {0};
+	return neighbour;
 }
 
 void sendMessage(char *messageContent, char *neighbourPid, char *senderPid)
@@ -286,7 +309,13 @@ void sendMessage(char *messageContent, char *neighbourPid, char *senderPid)
 
 	printMessage(message);
 
-	if(TEMP_FAILURE_RETRY(mq_send(queue, (const char*) &message, MAX_MSG_SIZE, SIGRTMIN)))
+	Neighbour neighbour = findNeighbourByPid(neighbourPid);
+	if (neighbour.queue <= 0) {
+		printf("Neighbour with PID [%s] not found\n", neighbourPid);
+		return;
+	}
+
+	if(TEMP_FAILURE_RETRY(mq_send(neighbour.queue, (const char*) &message, MAX_MSG_SIZE, SIGRTMIN)))
 	{
 		ERR("mq_send");
 	}
@@ -335,7 +364,7 @@ int main(int argc, char** argv)
 
 	if (neighbourPid != NULL)
 	{
-		sendRegistrationRequest(currentProcessPid, neighbourPid);
+		sendRegistrationRequest(currentProcessPid, neighbourPid, neighbourPid);
 	}
 	
 	readDataAndSendMessage(currentProcessPid);
